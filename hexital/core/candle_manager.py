@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from functools import cmp_to_key
-from typing import List, Optional, Set
+from typing import Callable, List, Optional, Set
 
 from hexital.core.candle import Candle
 from hexital.core.candlestick_type import CandlestickType
@@ -26,6 +26,9 @@ class CandleManager:
     timeframe_fill: bool = False
     candlestick: Optional[CandlestickType] = None
 
+    _append_impl: Callable[[Candle], None]
+    _extend_impl: Callable[[List[Candle]], None]
+
     def __init__(
         self,
         candles: Optional[List[Candle]] = None,
@@ -33,6 +36,7 @@ class CandleManager:
         timeframe: Optional[timedelta] = None,
         timeframe_fill: bool = False,
         candlestick: Optional[CandlestickType] = None,
+        fast: bool = True,
     ):
         if candles:
             self.candles = candles
@@ -43,6 +47,13 @@ class CandleManager:
         self.timeframe = timeframe
         self.timeframe_fill = timeframe_fill
         self.candlestick = candlestick
+
+        if fast:
+            self._append_impl = self._append_fast
+            self._extend_impl = self._extend_fast
+        else:
+            self._append_impl = self._append_slow
+            self._extend_impl = self._extend_slow
 
         self._tasks()
 
@@ -70,7 +81,6 @@ class CandleManager:
         self._name = name
 
     def _tasks(self):
-        self.collapse_candles()
         self.convert_candles()
         self.trim_candles()
 
@@ -80,34 +90,73 @@ class CandleManager:
                 return True
         return False
 
-    def append(self, candles: Candle | List[Candle] | dict | List[dict] | list | List[list]):
-        candles_ = []
+    def _to_candle(self, candle: Candle | dict | list) -> Candle:
+        if isinstance(candle, Candle):
+            return candle
+        elif isinstance(candle, dict):
+            return Candle.from_dict(candle)
+        elif isinstance(candle, list):
+            return Candle.from_list(candle)
+        else:
+            raise ValueError(f"Invalid candle type: {type(candle)}")
 
-        if isinstance(candles, Candle):
-            candles_.append(candles)
-        elif isinstance(candles, dict):
-            candles_.append(Candle.from_dict(candles))
-        elif isinstance(candles, list):
-            if not candles:
-                return
-            candle_ = candles[0]
-            if isinstance(candle_, Candle):
-                candles_.extend(candles)
-            elif isinstance(candle_, dict):
-                candles_.extend(Candle.from_dicts(candles))
-            elif isinstance(candle_, (float, int, datetime)):
-                candles_.append(Candle.from_list(candles))
-            elif isinstance(candle_, list):
-                candles_.extend(Candle.from_lists(candles))
-            else:
-                raise TypeError
+    def _to_candles(self, candles: List[Candle] | List[dict] | List[list]) -> List[Candle]:
+        if not candles:
+            return []
 
-        self.sort_candles(candles_)
+        candle_ = candles[0]
+        if isinstance(candle_, Candle):
+            return candles
+        elif isinstance(candle_, dict):
+            return Candle.from_dicts(candles)
+        elif isinstance(candle_, (float, int, datetime)):
+            return [Candle.from_list(candles)]
+        elif isinstance(candle_, list):
+            return Candle.from_lists(candles)
+        else:
+            raise TypeError
+
+    def _append_fast(self, candle: Candle):
+        """
+        For candles that start a new interval, we assume that candle already starts at rounded timestamp, for all but the first candle.
+        """
+
+        if not self.timeframe:
+            self.candles.append(candle)
+            return
+
+        if not self.candles:
+            start_time = round_down_timestamp(candle.timestamp, self.timeframe)
+            candle.set_collapsed_timestamp(start_time)
+            self.candles.append(candle)
+            return
+
+        prev_candle = self.candles[-1]
+        next_start_time = prev_candle.timestamp + self.timeframe
+
+        if candle.timestamp < next_start_time:
+            prev_candle.merge(candle)
+        elif candle.timestamp == next_start_time:
+            self.candles.append(candle)
+        else:
+            raise ValueError(f"Expected input Candle {candle} to have timestamp {next_start_time} but got {candle.timestamp}")
+
+    def _append_slow(self, candle: Candle):
+        self.candles.append(candle.clean_copy())
+        self.collapse_candles()
+
+    def append(self, candle: Candle | dict | list):
+        candle = self._to_candle(candle)
+        self._append_impl(candle)
+        self._tasks()
+
+    def _extend_slow(self, candles: List[Candle]):
+        self.sort_candles(candles)
 
         to_sort = False
         last_timestamp = self.candles[-1].timestamp if len(self.candles) > 0 else None
 
-        for candle in candles_:
+        for candle in candles:
             if last_timestamp and candle.timestamp < last_timestamp:
                 to_sort = True
             if not candle.timeframe or not self.timeframe:
@@ -118,6 +167,15 @@ class CandleManager:
         if to_sort:
             self.sort_candles()
 
+        self.collapse_candles()
+
+    def _extend_fast(self, candles: List[Candle]):
+        for candle in candles:
+            self._append_fast(candle)
+
+    def extend(self, candles: List[Candle] | List[dict] | List[list]):
+        candles = self._to_candles(candles)
+        self._extend_impl(candles)
         self._tasks()
 
     def sort_candles(self, candles: Optional[List[Candle]] = None):
@@ -176,6 +234,8 @@ class CandleManager:
         init_candle.timeframe = self.timeframe
 
         start_time = round_down_timestamp(init_candle.timestamp, self.timeframe)
+        assert init_candle.timestamp.tzinfo is not None
+        assert start_time.tzinfo is not None
         end_time = start_time + self.timeframe
 
         if not on_timeframe(init_candle.timestamp, self.timeframe):
@@ -189,6 +249,7 @@ class CandleManager:
             candle.timestamp = clean_timestamp(candle.timestamp)
             candle.timeframe = self.timeframe
 
+            assert (start_time.tzinfo is None) == (candle.timestamp.tzinfo is None), f"{start_time} {candle.timestamp}"
             if start_time < candle.timestamp <= end_time and prev_candle.timestamp == end_time:
                 prev_candle.merge(candle)
             elif (

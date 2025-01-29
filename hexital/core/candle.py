@@ -6,7 +6,7 @@ except ImportError:
     UTC = False
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from hexital.exceptions import CandleAlreadyTagged
 from hexital.utils.timeframe import TimeFrame, convert_timeframe_to_timedelta
@@ -20,7 +20,7 @@ class Candle:
     low: float
     close: float
     volume: int
-    timestamp: datetime
+    timestamp: datetime  # start timestamp
     indicators: Dict[str, float | Dict[str, float | None] | None]
     sub_indicators: Dict[str, float | Dict[str, float | None] | None]
     timeframe: Optional[timedelta]
@@ -190,7 +190,7 @@ class Candle:
         )
 
     @staticmethod
-    def from_dicts(candles: List[Dict[str, float]]) -> List[Candle]:
+    def from_dicts(candles: Sequence[Dict[str, float]]) -> List[Candle]:
         """
         Create's a list of `Candle` object's from a list of dictionary representation.
 

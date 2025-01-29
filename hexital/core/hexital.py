@@ -1,7 +1,7 @@
 from copy import copy
 from datetime import timedelta
 from importlib import import_module
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Sequence
 
 from hexital.core.candle import Candle
 from hexital.core.candle_manager import DEFAULT_CANDLES, CandleManager
@@ -163,19 +163,27 @@ class Hexital:
         self.purge(name)
         self._indicators.pop(name, None)
 
+    def _relevant_candle_managers(self, timeframe: Optional[str | TimeFrame | timedelta | int] = None):
+        if timeframe is None or timeframe not in self._candles:
+            return self._candles.values()
+        return (self._candles[timeframe],)
+
     def append(
         self,
-        candles: Candle | List[Candle] | dict | List[dict] | list | List[list],
+        candle: Candle | dict | list,
         timeframe: Optional[str | TimeFrame | timedelta | int] = None,
     ):
-        timeframe_name = self._parse_timeframe(timeframe)
+        for candle_manager in self._relevant_candle_managers(timeframe):
+            candle_manager.append(candle)
+        self.calculate()
 
-        if timeframe_name and self._candles.get(timeframe_name):
-            self._candles[timeframe_name].append(candles)
-        else:
-            for candle_manager in self._candles.values():
-                candle_manager.append(candles)
-
+    def extend(
+        self,
+        candles: Sequence[Candle] | Sequence[dict] | Sequence[list],
+        timeframe: Optional[str | TimeFrame | timedelta | int] = None,
+    ):
+        for candle_manager in self._relevant_candle_managers(timeframe):
+            candle_manager.extend(candles)
         self.calculate()
 
     def calculate(self, name: Optional[str] = None):
